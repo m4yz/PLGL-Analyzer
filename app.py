@@ -406,8 +406,8 @@ display_cols = [
 ]
 show = drivers[display_cols].copy()
 show["Status"] = np.where(
-    show[variance_col] > 0, "🔴 OVER BUDGET",
-    np.where(show[variance_col] < 0, "🟢 UNDER BUDGET", "⚪ ON BUDGET")
+    show[variance_col] > 0, "🔴 ABOVE BUDGET",
+    np.where(show[variance_col] < 0, "🟢 BELOW BUDGET", "⚪ ON BUDGET")
 )
 show["budget_rows"] = pd.to_numeric(show["budget_rows"], errors="coerce")
 show = show.rename(columns={
@@ -443,8 +443,8 @@ styled = (
 st.dataframe(styled, use_container_width=True, hide_index=True)
 
 st.caption(
-    "🔴 OVER BUDGET = Actual > PL Budget. "
-    "🟢 UNDER BUDGET = Actual < PL Budget. "
+    "🔴 ABOVE BUDGET = Actual > PL Budget. "
+    "🟢 BELOW BUDGET = Actual < PL Budget. "
     "Opex Budget is reference information only and does not determine the variance status."
 )
 
@@ -529,18 +529,33 @@ else:
         f"Budget IDR is calculated from **Budget USD × exchange rate**. "
         f"Current input: **1 USD = {money(usd_idr)}**."
     )
+    # Format the Opex reference as display text so Indonesian digit separators
+    # are guaranteed to appear in Streamlit (e.g. Rp 444.250.000).
+    budget_show = bmatch[
+        ["category", "budget_item", "tagging", "owner", "account_code",
+         "application", "budget_sgd", "budget_usd", "budget_idr", "remarks"]
+    ].copy()
+    budget_show = budget_show.rename(columns={
+        "category": "category",
+        "budget_item": "budget_item",
+        "tagging": "tagging",
+        "owner": "owner",
+        "account_code": "account_code",
+        "application": "application",
+        "budget_sgd": "Budget SGD",
+        "budget_usd": "Budget USD",
+        "budget_idr": "Budget IDR",
+        "remarks": "remarks",
+    })
+    budget_styled = budget_show.style.format({
+        "Budget SGD": lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+        "Budget USD": lambda v: "-" if pd.isna(v) else f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+        "Budget IDR": lambda v: money(v),
+    })
     st.dataframe(
-        bmatch[
-            ["category", "budget_item", "tagging", "owner", "account_code",
-             "application", "budget_sgd", "budget_usd", "budget_idr", "remarks"]
-        ],
+        budget_styled,
         use_container_width=True,
         hide_index=True,
-        column_config={
-            "budget_sgd": st.column_config.NumberColumn("Budget SGD", format="%.2f"),
-            "budget_usd": st.column_config.NumberColumn("Budget USD", format="%.2f"),
-            "budget_idr": st.column_config.NumberColumn("Budget IDR", format="Rp %.0f"),
-        },
     )
 
 # -----------------------------
