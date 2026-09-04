@@ -298,8 +298,9 @@ if not pp_files or not pr_files or not budget_file:
         ### Workflow
         **PL variance → GL contributors → transaction drill-down → Opex Budget mapping check**
 
-        The analyzer intentionally does **not** compare PL budget amounts directly to the Opex Budget currency,
+        The analyzer intentionally does **not** compare PL budget amounts directly to the Opex Budget,
         because the supplied Opex Budget is annual SGD/USD while the PL is monthly/YTD IDR.
+        The Opex Budget USD can be converted to IDR using the exchange rate entered in the sidebar.
         """
     )
     st.stop()
@@ -356,6 +357,15 @@ datasets = {
 st.sidebar.divider()
 prop = st.sidebar.selectbox("Property", ["PPJKT", "PRSJKT"])
 view = st.sidebar.radio("View", ["Current Month", "YTD"])
+usd_idr = st.sidebar.number_input(
+    "USD → IDR Exchange Rate",
+    min_value=1_000.0,
+    value=17_770.0,
+    step=10.0,
+    help="Enter how many IDR for 1 USD. Opex Budget IDR is calculated from Budget USD × this rate.",
+)
+st.sidebar.caption(f"1 USD = {money(usd_idr)}")
+
 threshold = st.sidebar.number_input("Minimum absolute variance (Rp)", min_value=0, value=1_000_000, step=500_000)
 
 pl, gl = datasets[prop]
@@ -514,16 +524,22 @@ if bmatch.empty:
     )
 else:
     st.write(f"**P{selected} — {row['description']}**")
+    bmatch["budget_idr"] = bmatch["budget_usd"] * usd_idr
+    st.caption(
+        f"Budget IDR is calculated from **Budget USD × exchange rate**. "
+        f"Current input: **1 USD = {money(usd_idr)}**."
+    )
     st.dataframe(
         bmatch[
             ["category", "budget_item", "tagging", "owner", "account_code",
-             "application", "budget_sgd", "budget_usd", "remarks"]
+             "application", "budget_sgd", "budget_usd", "budget_idr", "remarks"]
         ],
         use_container_width=True,
         hide_index=True,
         column_config={
             "budget_sgd": st.column_config.NumberColumn("Budget SGD", format="%.2f"),
             "budget_usd": st.column_config.NumberColumn("Budget USD", format="%.2f"),
+            "budget_idr": st.column_config.NumberColumn("Budget IDR", format="Rp %.0f"),
         },
     )
 
@@ -546,6 +562,7 @@ st.caption(
 )
 
 st.caption(
+    "The Opex Budget IDR reference uses Budget USD × the USD→IDR rate entered in the sidebar. "
     "V1 focuses on the business question: why did Actual exceed PL Budget? "
     "The next enhancement can compare transaction descriptions and budget items "
     "to suggest possible Finance mapping issues."
