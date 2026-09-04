@@ -23,11 +23,20 @@ def money(v):
 
 
 def normalize_account(x):
+    """Normalize Excel/SAP account values without corrupting numeric float accounts."""
     if pd.isna(x):
         return ""
+    if isinstance(x, (int, np.integer)):
+        return str(int(x))
+    if isinstance(x, (float, np.floating)):
+        if float(x).is_integer():
+            return str(int(x))
     s = str(x).strip().upper()
-    s = re.sub(r"[^0-9]", "", s)
-    return s
+    # Handle text values such as "758069.0" or "P758069".
+    s = re.sub(r"^P(?=\\d)", "", s)
+    if re.fullmatch(r"\\d+\\.0+", s):
+        s = s.split(".")[0]
+    return re.sub(r"[^0-9]", "", s)
 
 
 def read_excel_file(uploaded):
@@ -375,6 +384,7 @@ st.divider()
 # Variance contributors
 # -----------------------------
 st.subheader("🔎 Top Variance Contributors")
+st.caption("Variance is driven by PL Actual vs PL Budget. Opex Budget is reference only. PL account Pxxxx is matched to GL account xxxx.")
 
 drivers = data[abs(data[variance_col]) >= threshold].copy()
 drivers["abs_variance"] = drivers[variance_col].abs()
@@ -389,6 +399,7 @@ show["Status"] = np.where(
     show[variance_col] > 0, "🔴 OVER BUDGET",
     np.where(show[variance_col] < 0, "🟢 UNDER BUDGET", "⚪ ON BUDGET")
 )
+show["budget_rows"] = pd.to_numeric(show["budget_rows"], errors="coerce")
 show = show.rename(columns={
     "pl_account": "PL Account",
     "description": "Description",
