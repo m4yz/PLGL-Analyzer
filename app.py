@@ -131,6 +131,7 @@ def parse_gl(uploaded):
     account_col = find_col(["account"])
     amount_col = find_col(["amount in local currency", "amount"])
     date_col = find_col(["posting date"])
+    assignment_col = find_col(["assignment"])
     text_col = find_col(["text"])
     doc_col = find_col(["document number"])
     ref_col = find_col(["reference"])
@@ -144,6 +145,7 @@ def parse_gl(uploaded):
         "account": df[account_col].map(normalize_account),
         "amount": pd.to_numeric(df[amount_col], errors="coerce").fillna(0),
         "posting_date": pd.to_datetime(df[date_col], errors="coerce") if date_col else pd.NaT,
+        "assignment": df[assignment_col].astype(str) if assignment_col else "",
         "text": df[text_col].astype(str) if text_col else "",
         "document": df[doc_col].astype(str) if doc_col else "",
         "reference": df[ref_col].astype(str) if ref_col else "",
@@ -432,18 +434,23 @@ if g.empty:
     st.warning("No matching GL transactions found for this account.")
 else:
     gl_show = g[[
-        "posting_date", "amount", "document", "reference",
-        "text", "cost_center", "profit_center"
+        "posting_date", "assignment", "document",
+        "amount", "text", "cost_center", "profit_center"
     ]].copy()
     gl_show = gl_show.rename(columns={
         "posting_date": "Posting Date",
-        "amount": "Amount",
+        "assignment": "Assignment",
         "document": "Document",
-        "reference": "Reference",
-        "text": "Text",
+        "amount": "Amount",
+        "text": "Text / Description",
         "cost_center": "Cost Center",
         "profit_center": "Profit Center",
     })
+    st.caption(
+        "**Assignment** = label/category used on the GL posting (often the quickest clue to who/what the charge relates to). "
+        "**Text / Description** = the transaction narrative/details. "
+        "Use both together with Amount when investigating the variance."
+    )
     gl_styled = gl_show.style.format({
         "Posting Date": lambda v: "" if pd.isna(v) else v.strftime("%d-%b-%Y"),
         "Amount": lambda v: money(v),
