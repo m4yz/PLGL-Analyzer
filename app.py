@@ -16,18 +16,10 @@ st.caption("PL → GL → Opex Budget | 2 Properties | Monthly variance root-cau
 # Helpers
 # -----------------------------
 def money(v):
+    """Indonesian Rupiah display with thousands separators."""
     if pd.isna(v):
         return "-"
-    v = float(v)
-    sign = "-" if v < 0 else ""
-    v = abs(v)
-    if v >= 1_000_000_000:
-        return f"{sign}Rp {v/1_000_000_000:.2f}B"
-    if v >= 1_000_000:
-        return f"{sign}Rp {v/1_000_000:.2f}M"
-    if v >= 1_000:
-        return f"{sign}Rp {v/1_000:.1f}K"
-    return f"{sign}Rp {v:,.0f}"
+    return f"Rp {float(v):,.0f}".replace(",", ".")
 
 
 def normalize_account(x):
@@ -364,26 +356,51 @@ drivers = drivers.sort_values("abs_variance", ascending=False)
 
 display_cols = [
     "pl_account", "description", actual_col, budget_col, variance_col,
-    "mapping_status", "budget_rows"
+    "budget_rows"
 ]
-st.dataframe(
-    drivers[display_cols].rename(columns={
-        "pl_account": "PL Account",
-        "description": "Description",
-        actual_col: "Actual",
-        budget_col: "PL Budget",
-        variance_col: "Variance",
-        "mapping_status": "Budget Mapping",
-        "budget_rows": "Budget Rows",
-    }),
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Actual": st.column_config.NumberColumn(format="Rp %.0f"),
-        "PL Budget": st.column_config.NumberColumn(format="Rp %.0f"),
-        "Variance": st.column_config.NumberColumn(format="Rp %.0f"),
-    },
+show = drivers[display_cols].copy()
+show["Status"] = np.where(
+    show[variance_col] > 0, "🔴 OVER BUDGET",
+    np.where(show[variance_col] < 0, "🟢 UNDER BUDGET", "⚪ ON BUDGET")
 )
+show = show.rename(columns={
+    "pl_account": "PL Account",
+    "description": "Description",
+    actual_col: "Actual",
+    budget_col: "PL Budget",
+    variance_col: "Variance",
+    "budget_rows": "Opex Budget Ref.",
+})
+
+def variance_style(v):
+    if pd.isna(v):
+        return ""
+    if v > 0:
+        return "background-color: #ffd6d6; color: #9b0000; font-weight: 700"
+    if v < 0:
+        return "background-color: #dff2df; color: #146414; font-weight: 700"
+    return ""
+
+cols_order = ["Status", "PL Account", "Description", "Actual", "PL Budget", "Variance", "Opex Budget Ref."]
+show = show[cols_order]
+
+styled = (
+    show.style
+    .format({
+        "Actual": lambda v: money(v),
+        "PL Budget": lambda v: money(v),
+        "Variance": lambda v: money(v),
+    })
+    .map(variance_style, subset=["Variance"])
+)
+st.dataframe(styled, use_container_width=True, hide_index=True)
+
+st.caption(
+    "🔴 OVER BUDGET = Actual > PL Budget. "
+    "🟢 UNDER BUDGET = Actual < PL Budget. "
+    "Opex Budget is reference information only and does not determine the variance status."
+)
+
 
 # -----------------------------
 # Drilldown
@@ -414,28 +431,40 @@ d4.metric("Largest GL", money(g["amount"].max()) if not g.empty else "Rp 0")
 if g.empty:
     st.warning("No matching GL transactions found for this account.")
 else:
-    st.dataframe(
-        g[["posting_date", "amount", "document", "reference", "text", "cost_center", "profit_center"]],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "posting_date": st.column_config.DateColumn("Posting Date"),
-            "amount": st.column_config.NumberColumn("Amount", format="Rp %.0f"),
-        },
-    )
+    gl_show = g[[
+        "posting_date", "amount", "document", "reference",
+        "text", "cost_center", "profit_center"
+    ]].copy()
+    gl_show = gl_show.rename(columns={
+        "posting_date": "Posting Date",
+        "amount": "Amount",
+        "document": "Document",
+        "reference": "Reference",
+        "text": "Text",
+        "cost_center": "Cost Center",
+        "profit_center": "Profit Center",
+    })
+    gl_styled = gl_show.style.format({
+        "Posting Date": lambda v: "" if pd.isna(v) else v.strftime("%d-%b-%Y"),
+        "Amount": lambda v: money(v),
+    })
+    st.dataframe(gl_styled, use_container_width=True, hide_index=True)
 
 # -----------------------------
 # Budget mapping
 # -----------------------------
 st.divider()
-st.subheader("💰 Opex Budget Mapping")
+st.subheader("💰 Opex Budget Reference")
 
 bmatch = budget[
     (budget["property"] == prop) & (budget["account"] == selected)
 ].copy()
 
 if bmatch.empty:
-    st.error(f"🔴 No Opex Budget row found for P{selected}. Review Finance mapping.")
+    st.info(
+        f"No Opex Budget reference is mapped to P{selected}. "
+        "This does not make the PL variance wrong; it is only a reference for review."
+    )
 else:
     st.write(f"**P{selected} — {row['description']}**")
     st.dataframe(
@@ -452,27 +481,25 @@ else:
     )
 
 # -----------------------------
-# Exception summary
+# Opex reference coverage
 # -----------------------------
 st.divider()
-st.subheader("🚨 Mapping Exceptions")
+st.subheader("📋 Opex Budget Reference Coverage")
 
-exceptions = data[data["mapping_status"] != "🟢 Mapped"].copy()
-e1, e2 = st.columns(2)
-e1.metric("No Budget Mapping", int((data["mapping_status"] == "🔴 No Opex Budget Mapping").sum()))
-e2.metric("Multiple Budget Items", int((data["mapping_status"] == "🟡 Multiple Budget Items").sum()))
+mapped_count = int((data["budget_rows"].fillna(0) > 0).sum())
+unmapped_count = int((data["budget_rows"].fillna(0) == 0).sum())
 
-if not exceptions.empty:
-    st.dataframe(
-        exceptions[
-            ["pl_account", "description", actual_col, budget_col, variance_col,
-             "mapping_status", "budget_items"]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
+m1, m2 = st.columns(2)
+m1.metric("PL Accounts with Opex Reference", mapped_count)
+m2.metric("PL Accounts without Opex Reference", unmapped_count)
 
 st.caption(
-    "V1 mapping validation checks account-code coverage and multiple budget mappings. "
-    "Description/transaction-text intelligence can be added in V2 after the monthly workflow is validated."
+    "Coverage is informational only. An account without an Opex Budget reference "
+    "is not automatically treated as a variance error."
+)
+
+st.caption(
+    "V1 focuses on the business question: why did Actual exceed PL Budget? "
+    "The next enhancement can compare transaction descriptions and budget items "
+    "to suggest possible Finance mapping issues."
 )
