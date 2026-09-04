@@ -122,10 +122,20 @@ def parse_gl(uploaded):
     df.columns = [str(c).strip() for c in df.columns]
 
     def find_col(patterns):
+        normalized = {}
         for c in df.columns:
-            cl = c.lower()
-            if any(p in cl for p in patterns):
-                return c
+            key = re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
+            normalized[c] = key
+        for pattern in patterns:
+            p = re.sub(r"[^a-z0-9]+", " ", str(pattern).lower()).strip()
+            # Prefer an exact normalized header match.
+            for c, key in normalized.items():
+                if key == p:
+                    return c
+            # Then allow a contained phrase match.
+            for c, key in normalized.items():
+                if p in key:
+                    return c
         return None
 
     account_col = find_col(["account"])
@@ -153,6 +163,21 @@ def parse_gl(uploaded):
         "profit_center": df[profit_col].astype(str) if profit_col else "",
     })
     out = out[out["account"] != ""].copy()
+
+    # Defensive schema: Assignment is required by the drill-down UI.
+    # If an export ever omits it, keep the column blank rather than crashing.
+    required_cols = {
+        "assignment": "",
+        "document": "",
+        "text": "",
+        "cost_center": "",
+        "profit_center": "",
+        "reference": "",
+    }
+    for col, default in required_cols.items():
+        if col not in out.columns:
+            out[col] = default
+
     return out
 
 
@@ -271,7 +296,6 @@ if not pp_files or not pr_files or not budget_file:
     st.stop()
 
 # Parse
-@st.cache_data(show_spinner=False)
 def process_all(pp_bytes, pr_bytes, budget_bytes, pp_names, pr_names, budget_name):
     def wrap(name, data):
         class Upload:
@@ -423,6 +447,11 @@ selected = st.selectbox(
 
 row = data[data["account"] == selected].iloc[0]
 g = analyze_gl(selected, gl)
+
+# Ensure the GL frame always has the fields required by the drill-down.
+for _col in ["assignment", "document", "text", "cost_center", "profit_center"]:
+    if _col not in gl.columns:
+        gl[_col] = ""
 
 d1, d2, d3, d4 = st.columns(4)
 d1.metric("PL Variance", money(row[variance_col]))
