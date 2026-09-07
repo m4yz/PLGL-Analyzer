@@ -1,6 +1,16 @@
 import io
 import re
 from pathlib import Path
+from datetime import datetime
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
 
 import numpy as np
 import pandas as pd
@@ -266,6 +276,346 @@ def analyze_gl(pl_account, gl):
     if g.empty:
         return g
     return g.sort_values("amount", ascending=False)
+
+
+
+# -----------------------------
+# PDF Summary
+# -----------------------------
+def pdf_money(v):
+    if pd.isna(v):
+        return "-"
+    return f"Rp {float(v):,.0f}".replace(",", ".")
+
+
+def pdf_text(v):
+    if pd.isna(v):
+        return "-"
+    return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def build_pdf_summary(
+    prop, view, usd_idr, total_actual, total_budget, total_variance,
+    drivers, data, selected, row, g, bmatch, actual_col, budget_col, variance_col
+):
+    """Create an executive PDF summary from the currently selected analysis."""
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.3 * cm,
+        leftMargin=1.3 * cm,
+        topMargin=1.2 * cm,
+        bottomMargin=1.2 * cm,
+        title=f"IT OPEX Variance Analysis - {prop}",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        alignment=TA_CENTER,
+        fontSize=19,
+        leading=23,
+        spaceAfter=6,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSubtitle",
+        parent=styles["Normal"],
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#666666"),
+        fontSize=9,
+        spaceAfter=14,
+    )
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        textColor=colors.HexColor("#1F4E78"),
+        spaceBefore=10,
+        spaceAfter=6,
+    )
+    small_style = ParagraphStyle(
+        "Small",
+        parent=styles["Normal"],
+        fontSize=7.5,
+        leading=9,
+    )
+    normal_style = ParagraphStyle(
+        "NormalReport",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=12,
+    )
+
+    story = []
+
+    # Header
+    story.append(Paragraph("IT OPEX VARIANCE ANALYSIS SUMMARY", title_style))
+    story.append(
+        Paragraph(
+            f"Property: <b>{pdf_text(prop)}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"View: <b>{pdf_text(view)}</b> &nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"Generated: {datetime.now().strftime('%d-%b-%Y %H:%M')}",
+            subtitle_style,
+        )
+    )
+
+    # KPI Summary
+    story.append(Paragraph("1. Executive Summary", heading_style))
+
+    above_count = int((data[variance_col] > 0).sum())
+    below_count = int((data[variance_col] < 0).sum())
+    on_count = int((data[variance_col] == 0).sum())
+
+    kpi_data = [
+        ["Actual", "PL Budget", "Net Variance", "Above Budget", "Below Budget"],
+        [
+            pdf_money(total_actual),
+            pdf_money(total_budget),
+            pdf_money(total_variance),
+            str(above_count),
+            str(below_count),
+        ],
+    ]
+    kpi_table = Table(kpi_data, colWidths=[3.35 * cm] * 5)
+    kpi_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E78")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#F4F7FA")),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B7C3D0")),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(kpi_table)
+    story.append(Spacer(1, 8))
+
+    summary_note = (
+        f"The selected dataset contains <b>{above_count}</b> accounts above budget, "
+        f"<b>{below_count}</b> accounts below budget and <b>{on_count}</b> on budget. "
+        "Variance status is based on PL Actual versus PL Budget. "
+        "Opex Budget information is used as a reference for mapping and investigation."
+    )
+    story.append(Paragraph(summary_note, normal_style))
+
+    # Top Variance Contributors
+    story.append(Paragraph("2. Top Variance Contributors", heading_style))
+    top = drivers.copy()
+    top["Status"] = np.where(
+        top[variance_col] > 0, "ABOVE BUDGET",
+        np.where(top[variance_col] < 0, "BELOW BUDGET", "ON BUDGET")
+    )
+    top = top.head(10)
+
+    top_rows = [["Status", "PL Account", "Description", "Actual", "PL Budget", "Variance"]]
+    for _, r in top.iterrows():
+        top_rows.append([
+            pdf_text(r["Status"]),
+            pdf_text(r["pl_account"]),
+            Paragraph(pdf_text(r["description"]), small_style),
+            pdf_money(r[actual_col]),
+            pdf_money(r[budget_col]),
+            pdf_money(r[variance_col]),
+        ])
+
+    top_table = Table(
+        top_rows,
+        colWidths=[2.0 * cm, 1.8 * cm, 5.1 * cm, 2.45 * cm, 2.45 * cm, 2.45 * cm],
+        repeatRows=1,
+    )
+    top_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E2F3")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CED6")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]
+    for i, (_, r) in enumerate(top.iterrows(), start=1):
+        if r[variance_col] > 0:
+            top_style.append(("BACKGROUND", (0, i), (0, i), colors.HexColor("#FCE4D6")))
+        elif r[variance_col] < 0:
+            top_style.append(("BACKGROUND", (0, i), (0, i), colors.HexColor("#E2F0D9")))
+    top_table.setStyle(TableStyle(top_style))
+    story.append(top_table)
+
+    # Selected account analysis
+    story.append(Paragraph("3. Selected Account Investigation", heading_style))
+    status = (
+        "ABOVE BUDGET" if row[variance_col] > 0
+        else "BELOW BUDGET" if row[variance_col] < 0
+        else "ON BUDGET"
+    )
+
+    account_rows = [
+        ["PL Account", f"P{selected}"],
+        ["Description", pdf_text(row["description"])],
+        ["Status", status],
+        ["Actual", pdf_money(row[actual_col])],
+        ["PL Budget", pdf_money(row[budget_col])],
+        ["Variance", pdf_money(row[variance_col])],
+        ["GL Transactions", str(len(g))],
+        ["GL Total", pdf_money(g["amount"].sum()) if not g.empty else "Rp 0"],
+    ]
+    account_table = Table(account_rows, colWidths=[4.0 * cm, 13.0 * cm])
+    account_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F1F3F5")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CED6")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(account_table)
+    story.append(Spacer(1, 7))
+
+    # GL detail
+    story.append(Paragraph("4. GL Transaction Contributors", heading_style))
+    if g.empty:
+        story.append(Paragraph("No matching GL transactions were found for this account.", normal_style))
+    else:
+        gl_pdf = g.copy()
+        gl_pdf["abs_amount"] = gl_pdf["amount"].abs()
+        gl_pdf = gl_pdf.sort_values("abs_amount", ascending=False).head(12)
+
+        gl_rows = [["Posting Date", "Assignment", "Document", "Amount", "Text / Description"]]
+        for _, r in gl_pdf.iterrows():
+            date_value = ""
+            if pd.notna(r.get("posting_date")):
+                date_value = pd.to_datetime(r["posting_date"]).strftime("%d-%b-%Y")
+            gl_rows.append([
+                date_value,
+                Paragraph(pdf_text(r.get("assignment", "")), small_style),
+                pdf_text(r.get("document", "")),
+                pdf_money(r.get("amount", 0)),
+                Paragraph(pdf_text(r.get("text", "")), small_style),
+            ])
+
+        gl_table = Table(
+            gl_rows,
+            colWidths=[2.2 * cm, 3.2 * cm, 2.2 * cm, 2.6 * cm, 7.8 * cm],
+            repeatRows=1,
+        )
+        gl_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9E2F3")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CED6")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(gl_table)
+
+    # Opex reference
+    story.append(Paragraph("5. Opex Budget Reference", heading_style))
+    if bmatch is None or bmatch.empty:
+        story.append(
+            Paragraph(
+                f"No Opex Budget reference is mapped to P{selected}. "
+                "This does not automatically mean the PL variance is incorrect.",
+                normal_style,
+            )
+        )
+    else:
+        b = bmatch.copy()
+        b["budget_idr"] = pd.to_numeric(b["budget_usd"], errors="coerce").fillna(0) * usd_idr
+
+        story.append(
+            Paragraph(
+                f"USD to IDR rate used: <b>1 USD = {pdf_money(usd_idr)}</b>. "
+                "Budget IDR is calculated as Budget USD multiplied by the input exchange rate.",
+                normal_style,
+            )
+        )
+        story.append(Spacer(1, 5))
+
+        budget_rows = [["Category", "Budget Item", "Application", "Budget USD", "Budget IDR", "Remarks"]]
+        for _, r in b.iterrows():
+            budget_rows.append([
+                Paragraph(pdf_text(r.get("category", "")), small_style),
+                Paragraph(pdf_text(r.get("budget_item", "")), small_style),
+                Paragraph(pdf_text(r.get("application", "")), small_style),
+                pdf_text(f"{float(r.get('budget_usd', 0)):,.2f}"),
+                pdf_money(r.get("budget_idr", 0)),
+                Paragraph(pdf_text(r.get("remarks", "")), small_style),
+            ])
+
+        budget_table = Table(
+            budget_rows,
+            colWidths=[3.0 * cm, 6.2 * cm, 2.4 * cm, 2.2 * cm, 2.8 * cm, 2.5 * cm],
+            repeatRows=1,
+        )
+        budget_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#FFF2CC")),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C7CED6")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ALIGN", (3, 1), (4, -1), "RIGHT"),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(budget_table)
+
+    # Key observations
+    story.append(Paragraph("6. Key Observations", heading_style))
+    observations = []
+
+    if not drivers.empty:
+        largest = drivers.iloc[0]
+        observations.append(
+            f"Largest absolute variance: <b>{largest['pl_account']} - {pdf_text(largest['description'])}</b> "
+            f"at <b>{pdf_money(largest[variance_col])}</b>."
+        )
+
+    observations.append(
+        f"Selected account status: <b>{status}</b>, with variance of "
+        f"<b>{pdf_money(row[variance_col])}</b>."
+    )
+
+    if not g.empty:
+        biggest = g.loc[g["amount"].abs().idxmax()]
+        observations.append(
+            f"Largest GL transaction for the selected account: "
+            f"<b>{pdf_money(biggest['amount'])}</b> - "
+            f"{pdf_text(biggest.get('assignment', ''))} - "
+            f"{pdf_text(biggest.get('text', ''))}."
+        )
+
+    if bmatch is not None and not bmatch.empty:
+        observations.append(
+            f"The selected account has <b>{len(bmatch)}</b> Opex Budget reference item(s). "
+            "This reference should be reviewed together with GL Assignment and Text / Description."
+        )
+    else:
+        observations.append(
+            "The selected account has no Opex Budget reference mapping and should be reviewed if mapping is expected."
+        )
+
+    for obs in observations:
+        story.append(Paragraph(f"• {obs}", normal_style))
+        story.append(Spacer(1, 3))
+
+    story.append(Spacer(1, 10))
+    story.append(
+        Paragraph(
+            "Note: Variance status is determined by PL Actual versus PL Budget. "
+            "Opex Budget data is a supporting reference and does not independently determine Above/Below Budget status.",
+            small_style,
+        )
+    )
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer.getvalue()
+
 
 
 # -----------------------------
@@ -581,4 +931,41 @@ st.caption(
     "V1 focuses on the business question: why did Actual exceed PL Budget? "
     "The next enhancement can compare transaction descriptions and budget items "
     "to suggest possible Finance mapping issues."
+)
+
+
+# -----------------------------
+# PDF Summary Download
+# -----------------------------
+st.divider()
+st.subheader("📄 PDF Summary Analysis")
+st.caption(
+    "Generate an executive summary containing KPI, top variance contributors, "
+    "selected account investigation, GL contributors, Opex Budget reference and key observations."
+)
+
+pdf_bytes = build_pdf_summary(
+    prop=prop,
+    view=view,
+    usd_idr=usd_idr,
+    total_actual=total_actual,
+    total_budget=total_budget,
+    total_variance=total_variance,
+    drivers=drivers,
+    data=data,
+    selected=selected,
+    row=row,
+    g=g,
+    bmatch=bmatch,
+    actual_col=actual_col,
+    budget_col=budget_col,
+    variance_col=variance_col,
+)
+
+st.download_button(
+    label="📥 Download PDF Summary Analysis",
+    data=pdf_bytes,
+    file_name=f"IT_OPEX_Variance_Analysis_{prop}_{view.replace(' ', '_')}.pdf",
+    mime="application/pdf",
+    use_container_width=True,
 )
