@@ -592,18 +592,25 @@ def build_pdf_summary(
 # -----------------------------
 st.sidebar.header("📁 Upload Monthly Data")
 
-main_file = st.sidebar.file_uploader(
-    "Monthly PL + GL file",
+monthly_files = st.sidebar.file_uploader(
+    "Monthly PL + GL file(s)",
     type=["xlsx", "xls"],
-    accept_multiple_files=False,
-    help="Required. Ideally one workbook containing both a PL sheet and a GL sheet, e.g. PL FB + GL FB.",
+    accept_multiple_files=True,
+    help=(
+        "Required. Upload one workbook per property when PL + GL are combined, "
+        "for example PPJKT and PRSJKT. One file is enough for a single property. "
+        "If PL and GL are split into separate workbooks, upload them together here.\n"
+    ),
 )
 
 additional_files = st.sidebar.file_uploader(
     "Additional PL / GL file(s) — optional",
     type=["xlsx", "xls"],
     accept_multiple_files=True,
-    help="Optional. Use this only when PL and GL are delivered in separate workbooks or when you need to supplement the main file.",
+    help=(
+        "Optional. Use this only for extra/supplementary PL or GL files. "
+        "The main uploader already supports multiple properties.\n"
+    ),
 )
 
 budget_file = st.sidebar.file_uploader(
@@ -613,18 +620,21 @@ budget_file = st.sidebar.file_uploader(
     help="Optional reference only. The analyzer works without this file.",
 )
 
-if not main_file:
-    st.info("👈 Upload one monthly PL + GL workbook to start. Opex Budget and additional files are optional.")
+if not monthly_files:
+    st.info("👈 Upload at least one monthly PL + GL workbook to start.")
     st.markdown(
         """
         ### Workflow
-        **Upload 1 file → PL variance → GL contributors → transaction drill-down**
+        **1 file → 1 property** or **2 files → 2 properties**
 
-        **Optional:** add an Opex Budget workbook for budget mapping/reference, or additional PL/GL files
-        when the source data is split across workbooks.
+        Each workbook is detected automatically by **Property + Department**.
+        For example:
+        - `PPJKT` + `PL IT / GL IT`
+        - `PRSJKT` + `PL IT / GL IT`
+        - `PPJKT` + `PL FB / GL FB`
 
-        The analyzer automatically detects department sheets such as **PL FB / GL FB** or
-        **PL IT / GL IT**. The department name is not hard-coded into the analysis engine.
+        **Opex Budget is optional.** Additional PL/GL files are also optional and are only
+        needed when the source data is split or needs to be supplemented.
         """
     )
     st.stop()
@@ -633,84 +643,101 @@ if not main_file:
 # -----------------------------
 # Parse
 # -----------------------------
-def process_all(files):
-    pl_frames = []
-    gl_frames = []
+def make_upload(uploaded):
+    class Upload:
+        pass
+    u = Upload()
+    u.name = uploaded.name
+    u.getvalue = lambda uploaded=uploaded: uploaded.getvalue()
+    return u
+
+
+def detect_department(wb):
     departments = []
+    for s in wb.sheet_names:
+        name = str(s).strip()
+        m = re.match(r"^(?:PL|GL)[\s_-]*(.+)$", name, flags=re.I)
+        if m and m.group(1).strip():
+            departments.append(m.group(1).strip())
+    return list(dict.fromkeys(departments))
+
+
+def process_all(files):
+    # Store data separately by property so PPJKT and PRSJKT never get mixed.
+    datasets = {}
+    meta = {}
 
     for uploaded in files:
         wb = read_excel_file(uploaded)
+        prop = classify_property(uploaded.name, wb)
+        departments = detect_department(wb)
 
+        if prop == "UNKNOWN":
+            # Keep unknown files separate instead of silently assigning them to PPJKT.
+            prop = f"UNKNOWN — {uploaded.name}"
+
+        if prop not in datasets:
+            datasets[prop] = {"pl": [], "gl": []}
+            meta[prop] = {"departments": [], "files": []}
+
+        meta[prop]["files"].append(uploaded.name)
+        meta[prop]["departments"].extend(departments)
+
+        u = make_upload(uploaded)
         pl_sheets = [s for s in wb.sheet_names if str(s).strip().upper().startswith("PL")]
         gl_sheets = [s for s in wb.sheet_names if str(s).strip().upper().startswith("GL")]
 
-        # A workbook may contain both PL and GL for the same department.
-        for s in pl_sheets:
-            class Upload:
-                pass
-            u = Upload()
-            u.name = uploaded.name
-            u.getvalue = lambda uploaded=uploaded: uploaded.getvalue()
-            # parse_pl auto-detects the first PL sheet; temporarily reorder workbook
-            # is unnecessary for the common one-PL-sheet case.
+        if pl_sheets:
             try:
                 pl = parse_pl(u)
                 if not pl.empty:
-                    pl_frames.append(pl)
-            except Exception:
-                pass
+                    datasets[prop]["pl"].append(pl)
+            except Exception as e:
+                # If a workbook has a PL sheet but parsing fails, surface it later.
+                meta[prop].setdefault("errors", []).append(f"PL: {e}")
 
-            dept = re.sub(r"^PL[\s_-]*", "", str(s), flags=re.I).strip()
-            if dept:
-                departments.append(dept)
-
-        for s in gl_sheets:
-            class Upload:
-                pass
-            u = Upload()
-            u.name = uploaded.name
-            u.getvalue = lambda uploaded=uploaded: uploaded.getvalue()
+        if gl_sheets:
             try:
                 gl = parse_gl(u)
                 if not gl.empty:
-                    gl_frames.append(gl)
-            except Exception:
-                pass
+                    datasets[prop]["gl"].append(gl)
+            except Exception as e:
+                meta[prop].setdefault("errors", []).append(f"GL: {e}")
 
-            dept = re.sub(r"^GL[\s_-]*", "", str(s), flags=re.I).strip()
-            if dept:
-                departments.append(dept)
+    # Concatenate each property's files independently.
+    final = {}
+    for prop, parts in datasets.items():
+        pl = pd.concat(parts["pl"], ignore_index=True) if parts["pl"] else pd.DataFrame()
+        gl = pd.concat(parts["gl"], ignore_index=True) if parts["gl"] else pd.DataFrame()
 
-    pl = pd.concat(pl_frames, ignore_index=True) if pl_frames else pd.DataFrame()
-    gl = pd.concat(gl_frames, ignore_index=True) if gl_frames else pd.DataFrame()
+        if pl.empty and gl.empty:
+            continue
+        if pl.empty:
+            raise ValueError(f"No PL sheet could be parsed for {prop}.")
+        if gl.empty:
+            raise ValueError(f"No GL sheet could be parsed for {prop}.")
 
-    if pl.empty:
+        final[prop] = (pl, gl)
+        meta[prop]["departments"] = list(dict.fromkeys(meta[prop]["departments"]))
+
+    if not final:
         raise ValueError(
-            "No PL sheet could be detected. Expected a sheet name beginning with 'PL', "
-            "for example 'PL FB' or 'PL IT'."
+            "No usable PL + GL data found. Expected workbook sheets beginning with 'PL' and 'GL', "
+            "for example 'PL IT' + 'GL IT' or 'PL FB' + 'GL FB'."
         )
-    if gl.empty:
-        raise ValueError(
-            "No GL sheet could be detected. Expected a sheet name beginning with 'GL', "
-            "for example 'GL FB' or 'GL IT'."
-        )
-
-    # Keep department label for display/reporting, but never use it to drive parsing.
-    dept_values = list(dict.fromkeys([d for d in departments if d]))
-    department = " / ".join(dept_values) if dept_values else "General"
 
     budget = None
     if budget_file:
         budget = parse_budget(budget_file)
 
-    return pl, gl, budget, department
+    return final, meta, budget
 
 
-files_to_process = [main_file] + (additional_files or [])
+files_to_process = list(monthly_files) + (additional_files or [])
 
 with st.spinner("Reading monthly PL and GL data..."):
     try:
-        pl, gl, budget, department = process_all(files_to_process)
+        datasets, dataset_meta, budget = process_all(files_to_process)
     except Exception as e:
         st.error(f"Unable to read the uploaded data: {type(e).__name__}: {e}")
         st.stop()
@@ -722,17 +749,26 @@ if budget is None:
         "account_code", "application", "budget_sgd", "budget_usd", "remarks", "account"
     ])
 
-# The monthly workbook itself is the source of truth. Property is inferred from the file.
-prop = property_from_file(main_file)
-if prop == "UNKNOWN":
-    prop = "PPJKT"
+# -----------------------------
+# Detected properties / departments
+# -----------------------------
+st.sidebar.success(f"Detected {len(datasets)} propert{'y' if len(datasets) == 1 else 'ies'}")
+for _prop, _meta in dataset_meta.items():
+    if _prop in datasets:
+        dept_text = ", ".join(_meta.get("departments", [])) or "General"
+        st.sidebar.caption(f"• {_prop} — {dept_text}")
 
-datasets = {
-    prop: (pl, gl),
-}
+# Property selector only appears when more than one property is uploaded.
+properties = list(datasets.keys())
+if len(properties) > 1:
+    prop = st.sidebar.selectbox("Property", properties)
+else:
+    prop = properties[0]
+    st.sidebar.caption(f"Detected property: {prop}")
 
-st.sidebar.success(f"Detected department: {department}")
-st.sidebar.caption(f"Detected property: {prop}")
+# Department is informational. The same analyzer can be reused by any department.
+department = ", ".join(dataset_meta[prop].get("departments", [])) or "General"
+st.sidebar.caption(f"Department: {department}")
 
 # -----------------------------
 # Controls
