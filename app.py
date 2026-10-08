@@ -870,11 +870,22 @@ styled = (
     })
     .map(variance_style, subset=["Variance"])
 )
-st.dataframe(styled, use_container_width=True, hide_index=True)
+
+# The variance table is selectable. Clicking a row automatically drives the
+# GL Drill-down account below, so users do not have to select the account twice.
+variance_event = st.dataframe(
+    styled,
+    use_container_width=True,
+    hide_index=True,
+    key="variance_contributors_table",
+    on_select="rerun",
+    selection_mode="single-row",
+)
 
 st.caption(
     "🔴 ABOVE BUDGET = Actual > PL Budget. "
     "🟢 BELOW BUDGET = Actual < PL Budget. "
+    "Click a row above to automatically open that account in GL Drill-down. "
     "Opex Budget is reference information only and does not determine the variance status."
 )
 
@@ -890,9 +901,25 @@ if not accounts:
     st.success("No variance above the selected threshold.")
     st.stop()
 
+# Preserve a selected account across Streamlit reruns. The table selection
+# takes priority whenever the user clicks a variance row.
+if variance_event and hasattr(variance_event, "selection"):
+    selected_rows = variance_event.selection.rows
+    if selected_rows:
+        selected_row_index = selected_rows[0]
+        if 0 <= selected_row_index < len(drivers):
+            st.session_state["selected_variance_account"] = drivers.iloc[selected_row_index]["account"]
+
+if (
+    "selected_variance_account" not in st.session_state
+    or st.session_state["selected_variance_account"] not in accounts
+):
+    st.session_state["selected_variance_account"] = accounts[0]
+
 selected = st.selectbox(
-    "Select a variance account",
+    "Selected variance account",
     accounts,
+    key="selected_variance_account",
     format_func=lambda a: f"P{a} — {data.loc[data.account.eq(a), 'description'].iloc[0]}",
 )
 
