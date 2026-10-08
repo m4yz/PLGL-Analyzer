@@ -7,10 +7,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="IT OPEX Variance Analyzer", page_icon="📊", layout="wide")
+st.set_page_config(page_title="OPEX Variance Analyzer", page_icon="📊", layout="wide")
 
-st.title("📊 IT OPEX Variance Analyzer")
-st.caption("PL → GL → Opex Budget | 2 Properties | Monthly variance root-cause analysis")
+st.title("📊 OPEX Variance Analyzer")
+st.caption("PL → GL → Budget Reference | Department-agnostic monthly variance root-cause analysis")
 
 
 # -----------------------------
@@ -56,7 +56,8 @@ def classify_property(filename, workbook):
 
 def parse_pl(uploaded):
     xls = read_excel_file(uploaded)
-    sheet = "PL IT" if "PL IT" in xls.sheet_names else xls.sheet_names[0]
+    pl_sheets = [s for s in xls.sheet_names if str(s).strip().upper().startswith("PL")]
+    sheet = pl_sheets[0] if pl_sheets else xls.sheet_names[0]
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
     # Actual / Budget / Variance / Description are fixed positions in the supplied PL format.
@@ -107,7 +108,8 @@ def parse_pl(uploaded):
 
 def parse_gl(uploaded):
     xls = read_excel_file(uploaded)
-    sheet = "GL IT" if "GL IT" in xls.sheet_names else xls.sheet_names[0]
+    gl_sheets = [s for s in xls.sheet_names if str(s).strip().upper().startswith("GL")]
+    sheet = gl_sheets[0] if gl_sheets else xls.sheet_names[0]
     raw = pd.read_excel(xls, sheet_name=sheet, header=None)
 
     header_row = None
@@ -342,7 +344,7 @@ def build_pdf_summary(
 
     story = []
 
-    story.append(Paragraph("IT OPEX VARIANCE ANALYSIS SUMMARY", title))
+    story.append(Paragraph("OPEX VARIANCE ANALYSIS SUMMARY", title))
     story.append(Paragraph(
         f"Property: <b>{pdf_text(prop)}</b> &nbsp; | &nbsp; "
         f"View: <b>{pdf_text(view)}</b> &nbsp; | &nbsp; "
@@ -588,105 +590,180 @@ def build_pdf_summary(
 # -----------------------------
 # Upload
 # -----------------------------
-st.sidebar.header("📁 Upload Monthly Files")
+st.sidebar.header("📁 Upload Monthly Data")
 
-pp_files = st.sidebar.file_uploader(
-    "PPJKT — PL + GL",
+main_file = st.sidebar.file_uploader(
+    "Monthly PL + GL file",
+    type=["xlsx", "xls"],
+    accept_multiple_files=False,
+    help="Required. Ideally one workbook containing both a PL sheet and a GL sheet, e.g. PL FB + GL FB.",
+)
+
+additional_files = st.sidebar.file_uploader(
+    "Additional PL / GL file(s) — optional",
     type=["xlsx", "xls"],
     accept_multiple_files=True,
-    key="pp",
+    help="Optional. Use this only when PL and GL are delivered in separate workbooks or when you need to supplement the main file.",
 )
-pr_files = st.sidebar.file_uploader(
-    "PRSJKT — PL + GL",
-    type=["xlsx", "xls"],
-    accept_multiple_files=True,
-    key="pr",
-)
+
 budget_file = st.sidebar.file_uploader(
-    "Opex Budget — 2 Property",
+    "Opex Budget — optional",
     type=["xlsx", "xls"],
     key="budget",
+    help="Optional reference only. The analyzer works without this file.",
 )
 
-if not pp_files or not pr_files or not budget_file:
-    st.info("👈 Upload 2 files for PPJKT, 2 files for PRSJKT, and the Opex Budget file to start.")
+if not main_file:
+    st.info("👈 Upload one monthly PL + GL workbook to start. Opex Budget and additional files are optional.")
     st.markdown(
         """
         ### Workflow
-        **PL variance → GL contributors → transaction drill-down → Opex Budget mapping check**
+        **Upload 1 file → PL variance → GL contributors → transaction drill-down**
 
-        The analyzer intentionally does **not** compare PL budget amounts directly to the Opex Budget,
-        because the supplied Opex Budget is annual SGD/USD while the PL is monthly/YTD IDR.
-        The Opex Budget USD can be converted to IDR using the exchange rate entered in the sidebar.
+        **Optional:** add an Opex Budget workbook for budget mapping/reference, or additional PL/GL files
+        when the source data is split across workbooks.
+
+        The analyzer automatically detects department sheets such as **PL FB / GL FB** or
+        **PL IT / GL IT**. The department name is not hard-coded into the analysis engine.
         """
     )
     st.stop()
 
+
+# -----------------------------
 # Parse
-def process_all(pp_bytes, pr_bytes, budget_bytes, pp_names, pr_names, budget_name):
-    def wrap(name, data):
-        class Upload:
-            pass
-        u = Upload()
-        u.name = name
-        u.getvalue = lambda: data
-        return u
+# -----------------------------
+def process_all(files):
+    pl_frames = []
+    gl_frames = []
+    departments = []
 
-    pp_pl = pp_gl = pr_pl = pr_gl = None
+    for uploaded in files:
+        wb = read_excel_file(uploaded)
 
-    for name, data in zip(pp_names, pp_bytes):
-        u = wrap(name, data)
-        wb = read_excel_file(u)
-        if "PL IT" in wb.sheet_names:
-            pp_pl = parse_pl(u)
-        if "GL IT" in wb.sheet_names:
-            pp_gl = parse_gl(u)
+        pl_sheets = [s for s in wb.sheet_names if str(s).strip().upper().startswith("PL")]
+        gl_sheets = [s for s in wb.sheet_names if str(s).strip().upper().startswith("GL")]
 
-    for name, data in zip(pr_names, pr_bytes):
-        u = wrap(name, data)
-        wb = read_excel_file(u)
-        if "PL IT" in wb.sheet_names:
-            pr_pl = parse_pl(u)
-        if "GL IT" in wb.sheet_names:
-            pr_gl = parse_gl(u)
+        # A workbook may contain both PL and GL for the same department.
+        for s in pl_sheets:
+            class Upload:
+                pass
+            u = Upload()
+            u.name = uploaded.name
+            u.getvalue = lambda uploaded=uploaded: uploaded.getvalue()
+            # parse_pl auto-detects the first PL sheet; temporarily reorder workbook
+            # is unnecessary for the common one-PL-sheet case.
+            try:
+                pl = parse_pl(u)
+                if not pl.empty:
+                    pl_frames.append(pl)
+            except Exception:
+                pass
 
-    budget = parse_budget(wrap(budget_name, budget_bytes))
-    return pp_pl, pp_gl, pr_pl, pr_gl, budget
+            dept = re.sub(r"^PL[\s_-]*", "", str(s), flags=re.I).strip()
+            if dept:
+                departments.append(dept)
 
-with st.spinner("Reading PL, GL and Opex Budget..."):
-    pp_pl, pp_gl, pr_pl, pr_gl, budget = process_all(
-        [f.getvalue() for f in pp_files],
-        [f.getvalue() for f in pr_files],
-        budget_file.getvalue(),
-        [f.name for f in pp_files],
-        [f.name for f in pr_files],
-        budget_file.name,
-    )
+        for s in gl_sheets:
+            class Upload:
+                pass
+            u = Upload()
+            u.name = uploaded.name
+            u.getvalue = lambda uploaded=uploaded: uploaded.getvalue()
+            try:
+                gl = parse_gl(u)
+                if not gl.empty:
+                    gl_frames.append(gl)
+            except Exception:
+                pass
+
+            dept = re.sub(r"^GL[\s_-]*", "", str(s), flags=re.I).strip()
+            if dept:
+                departments.append(dept)
+
+    pl = pd.concat(pl_frames, ignore_index=True) if pl_frames else pd.DataFrame()
+    gl = pd.concat(gl_frames, ignore_index=True) if gl_frames else pd.DataFrame()
+
+    if pl.empty:
+        raise ValueError(
+            "No PL sheet could be detected. Expected a sheet name beginning with 'PL', "
+            "for example 'PL FB' or 'PL IT'."
+        )
+    if gl.empty:
+        raise ValueError(
+            "No GL sheet could be detected. Expected a sheet name beginning with 'GL', "
+            "for example 'GL FB' or 'GL IT'."
+        )
+
+    # Keep department label for display/reporting, but never use it to drive parsing.
+    dept_values = list(dict.fromkeys([d for d in departments if d]))
+    department = " / ".join(dept_values) if dept_values else "General"
+
+    budget = None
+    if budget_file:
+        budget = parse_budget(budget_file)
+
+    return pl, gl, budget, department
+
+
+files_to_process = [main_file] + (additional_files or [])
+
+with st.spinner("Reading monthly PL and GL data..."):
+    try:
+        pl, gl, budget, department = process_all(files_to_process)
+    except Exception as e:
+        st.error(f"Unable to read the uploaded data: {type(e).__name__}: {e}")
+        st.stop()
+
+# Optional budget: create an empty reference frame so the core analyzer remains fully functional.
+if budget is None:
+    budget = pd.DataFrame(columns=[
+        "property", "category", "budget_item", "tagging", "owner",
+        "account_code", "application", "budget_sgd", "budget_usd", "remarks", "account"
+    ])
+
+# The monthly workbook itself is the source of truth. Property is inferred from the file.
+prop = property_from_file(main_file)
+if prop == "UNKNOWN":
+    prop = "PPJKT"
 
 datasets = {
-    "PPJKT": (pp_pl, pp_gl),
-    "PRSJKT": (pr_pl, pr_gl),
+    prop: (pl, gl),
 }
+
+st.sidebar.success(f"Detected department: {department}")
+st.sidebar.caption(f"Detected property: {prop}")
 
 # -----------------------------
 # Controls
 # -----------------------------
 st.sidebar.divider()
-prop = st.sidebar.selectbox("Property", ["PPJKT", "PRSJKT"])
 view = st.sidebar.radio("View", ["Current Month", "YTD"])
+
 usd_idr = st.sidebar.number_input(
     "USD → IDR Exchange Rate",
     min_value=1_000.0,
     value=17_770.0,
     step=10.0,
-    help="Enter how many IDR for 1 USD. Opex Budget IDR is calculated from Budget USD × this rate.",
+    help="Used only when an optional Opex Budget workbook contains Budget USD.",
 )
 st.sidebar.caption(f"1 USD = {money(usd_idr)}")
 
-threshold = st.sidebar.number_input("Minimum absolute variance (Rp)", min_value=0, value=1_000_000, step=500_000)
+threshold = st.sidebar.number_input(
+    "Minimum absolute variance (Rp)",
+    min_value=0,
+    value=1_000_000,
+    step=500_000,
+)
 
 pl, gl = datasets[prop]
-data = mapping_table(pl, budget, prop)
+data = mapping_table(pl, budget, prop) if not budget.empty else pl.copy()
+if budget.empty:
+    data["budget_rows"] = 0
+    data["budget_items"] = ""
+    data["budget_categories"] = ""
+    data["budget_sgd"] = 0
+    data["budget_usd"] = 0
 
 actual_col = "actual" if view == "Current Month" else "ytd_actual"
 budget_col = "budget" if view == "Current Month" else "ytd_budget"
@@ -711,7 +788,7 @@ st.divider()
 # Variance contributors
 # -----------------------------
 st.subheader("🔎 Top Variance Contributors")
-st.caption("Variance is driven by PL Actual vs PL Budget. Opex Budget is reference only. PL account Pxxxx is matched to GL account xxxx.")
+st.caption(f"Department: **{department}** · Variance is driven by PL Actual vs PL Budget. Opex Budget is optional reference only. PL account is matched to GL account.")
 
 drivers = data[abs(data[variance_col]) >= threshold].copy()
 drivers["abs_variance"] = drivers[variance_col].abs()
@@ -830,11 +907,16 @@ else:
 st.divider()
 st.subheader("💰 Opex Budget Reference")
 
-bmatch = budget[
-    (budget["property"] == prop) & (budget["account"] == selected)
-].copy()
+bmatch = (
+    budget[
+        (budget["property"] == prop) & (budget["account"] == selected)
+    ].copy()
+    if not budget.empty else pd.DataFrame()
+)
 
-if bmatch.empty:
+if budget.empty:
+    st.info("Opex Budget was not uploaded. This optional reference section is skipped.")
+elif bmatch.empty:
     st.info(
         f"No Opex Budget reference is mapped to P{selected}. "
         "This does not make the PL variance wrong; it is only a reference for review."
@@ -881,23 +963,26 @@ else:
 st.divider()
 st.subheader("📋 Opex Budget Reference Coverage")
 
-mapped_count = int((data["budget_rows"].fillna(0) > 0).sum())
-unmapped_count = int((data["budget_rows"].fillna(0) == 0).sum())
+if budget.empty:
+    st.info("Opex Budget was not uploaded, so reference coverage is not calculated.")
+else:
+    mapped_count = int((data["budget_rows"].fillna(0) > 0).sum())
+    unmapped_count = int((data["budget_rows"].fillna(0) == 0).sum())
 
-m1, m2 = st.columns(2)
-m1.metric("PL Accounts with Opex Reference", mapped_count)
-m2.metric("PL Accounts without Opex Reference", unmapped_count)
+    m1, m2 = st.columns(2)
+    m1.metric("PL Accounts with Opex Reference", mapped_count)
+    m2.metric("PL Accounts without Opex Reference", unmapped_count)
+
+    st.caption(
+        "Coverage is informational only. An account without an Opex Budget reference "
+        "is not automatically treated as a variance error."
+    )
 
 st.caption(
-    "Coverage is informational only. An account without an Opex Budget reference "
-    "is not automatically treated as a variance error."
-)
-
-st.caption(
-    "The Opex Budget IDR reference uses Budget USD × the USD→IDR rate entered in the sidebar. "
-    "V1 focuses on the business question: why did Actual exceed PL Budget? "
-    "The next enhancement can compare transaction descriptions and budget items "
-    "to suggest possible Finance mapping issues."
+    "The optional Opex Budget IDR reference uses Budget USD × the USD→IDR rate entered in the sidebar. "
+    "The analyzer focuses on the business question: why did Actual differ from PL Budget? "
+    "The same engine can be reused across departments as long as the workbook contains "
+    "recognizable PL and GL sheets."
 )
 
 # -----------------------------
@@ -906,8 +991,8 @@ st.caption(
 st.divider()
 st.subheader("📄 PDF Summary Analysis")
 st.caption(
-    "Generate a management-ready PDF based on the current Property, View, "
-    "selected variance account and USD → IDR exchange rate."
+    f"Generate a management-ready PDF for **{department}** based on the current "
+    "Property, View, selected variance account and optional USD → IDR exchange rate."
 )
 
 if st.button("📄 Generate PDF Summary Analysis", use_container_width=True):
@@ -942,7 +1027,7 @@ if st.session_state.get("pdf_summary_bytes"):
     st.download_button(
         "📥 Download PDF Summary Analysis",
         data=st.session_state["pdf_summary_bytes"],
-        file_name=f"IT_OPEX_Variance_Analysis_{prop}_{view.replace(' ', '_')}.pdf",
+        file_name=f"OPEX_Variance_Analysis_{prop}_{view.replace(' ', '_')}.pdf",
         mime="application/pdf",
         use_container_width=True,
     )
